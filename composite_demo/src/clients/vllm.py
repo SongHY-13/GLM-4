@@ -22,10 +22,11 @@ class VLLMClient(Client):
         )
         self.engine_args = EngineArgs(
             model=model_path,
-            tensor_parallel_size=1,
-            dtype="bfloat16",  # torch.bfloat16 is needed.
+            tensor_parallel_size=4,
+            max_model_len=65536,
+            dtype="float16",  # torch.bfloat16 is needed.
             trust_remote_code=True,
-            gpu_memory_utilization=0.6,
+            gpu_memory_utilization=0.9,
             enforce_eager=True,
             worker_use_ray=False,
         )

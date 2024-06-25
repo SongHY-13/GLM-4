@@ -28,9 +28,10 @@ from tools.tool_registry import dispatch_tool, get_tools
 from utils import extract_pdf, extract_docx, extract_pptx, extract_text
 
 
-CHAT_MODEL_PATH = os.environ.get("CHAT_MODEL_PATH", "THUDM/glm-4-9b-chat")
-VLM_MODEL_PATH = os.environ.get("VLM_MODEL_PATH", "THUDM/glm-4v-9b")
+CHAT_MODEL_PATH = os.environ.get("CHAT_MODEL_PATH", "/home/data/GLM-4/modelTemp/glm-4-9b-chat")
+VLM_MODEL_PATH = os.environ.get("VLM_MODEL_PATH", "/home/data/GLM-4/modelTemp/glm-4v-9b")
 
+# os.environ['USE_VLLM'] = '1' #设置环境变量以使用VLLM
 USE_VLLM = os.environ.get("USE_VLLM", "0") == "1"
 
 

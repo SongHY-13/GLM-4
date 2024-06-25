@@ -2,5 +2,5 @@ BROWSER_SERVER_URL = 'http://localhost:3000'
 
 IPYKERNEL = 'glm-4-demo'
 
-ZHIPU_AI_KEY = ''
+ZHIPU_AI_KEY = '74774973a67fcdfd8e97c49715a08838.HQnZuJjHoIY8Ekjl'
 COGVIEW_MODEL = 'cogview-3'

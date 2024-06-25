@@ -2,7 +2,7 @@
 
 This is a client part of composite_demo.
 We provide two clients, HFClient and VLLMClient, which are used to interact with the model.
-The HFClient is used to interact with the  transformers backend, and the VLLMClient is used to interact with the VLLM model.
+The HFClient is used to interact with the transformers backend, and the VLLMClient is used to interact with the VLLM model.
 
 """
 

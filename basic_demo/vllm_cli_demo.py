@@ -7,32 +7,37 @@ Usage:
 - Interact with the model by typing questions and receiving responses.
 
 Note: The script includes a modification to handle markdown to plain text conversion,
-ensuring that the CLI interface displays formatted text correctly.
+ensuring that the CLI interface displays formatted text correctly. 显存不够，而且T4不支持bfloat精度
 """
 import time
 import asyncio
 from transformers import AutoTokenizer
 from vllm import SamplingParams, AsyncEngineArgs, AsyncLLMEngine
 from typing import List, Dict
+import torch
+# import logging
+# logging.basicConfig(level=logging.WARNING) #设置日志级别，
 
-MODEL_PATH = 'THUDM/glm-4-9b'
+MODEL_PATH = '/home/data/GLM-4/modelTemp/glm-4-9b-chat'
 
 
 def load_model_and_tokenizer(model_dir: str):
     engine_args = AsyncEngineArgs(
         model=model_dir,
         tokenizer=model_dir,
-        tensor_parallel_size=1,
-        dtype="bfloat16",
+        tensor_parallel_size=4, #官方建议：遇到OOM增加
+        max_model_len=65536, #遇到OOM减小
+        # dtype="bfloat16",
+        dtype="float16",
         trust_remote_code=True,
-        gpu_memory_utilization=0.3,
+        gpu_memory_utilization=0.9, # 0.3增加以提高利用率
         enforce_eager=True,
         worker_use_ray=True,
         engine_use_ray=False,
-        disable_log_requests=True
+        disable_log_requests=True,
         # 如果遇见 OOM 现象，建议开启下述参数
         # enable_chunked_prefill=True,
-        # max_num_batched_tokens=8192
+        # max_num_batched_tokens=2048, 
     )
     tokenizer = AutoTokenizer.from_pretrained(
         model_dir,
@@ -42,6 +47,10 @@ def load_model_and_tokenizer(model_dir: str):
     engine = AsyncLLMEngine.from_engine_args(engine_args)
     return engine, tokenizer
 
+def print_memory_usage():
+    # 打印显存使用情况
+    print(f"Allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+    print(f"Cached: {torch.cuda.memory_reserved() / 1024**2:.2f} MB")
 
 engine, tokenizer = load_model_and_tokenizer(MODEL_PATH)
 
@@ -77,9 +86,9 @@ async def vllm_gen(messages: List[Dict[str, str]], top_p: float, temperature: fl
 
 async def chat():
     history = []
-    max_length = 8192
+    max_length = 8192 # 生成文本的最大长度
     top_p = 0.8
-    temperature = 0.6
+    temperature = 0.8  # 生成文本的随机性
 
     print("Welcome to the GLM-4-9B CLI chat. Type your messages below.")
     while True:
@@ -103,8 +112,9 @@ async def chat():
         output = ""
         async for output in vllm_gen(messages, top_p, temperature, max_length):
             print(output[current_length:], end="", flush=True)
-            current_length = len(output)
+            current_length = len(output)#output[current_length:]确保只打印从上次打印以来新增的文本部分。end=""防止在每次迭代结束时添加新行，flush=True确保输出立即显示在控制台上。
         history[-1][1] = output
+        # print_memory_usage() #打印内存使用情况
 
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@ from transformers import (
 ModelType = Union[PreTrainedModel, PeftModelForCausalLM]
 TokenizerType = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 
-MODEL_PATH = os.environ.get('MODEL_PATH', 'THUDM/glm-4-9b-chat')
+MODEL_PATH = os.environ.get('MODEL_PATH', '/home/data/GLM-4/modelTemp/glm-4-9b-chat')
 TOKENIZER_PATH = os.environ.get("TOKENIZER_PATH", MODEL_PATH)
 
 
@@ -175,4 +175,4 @@ with gr.Blocks() as demo:
     emptyBtn.click(lambda: (None, None), None, [chatbot, prompt_input], queue=False)
 
 demo.queue()
-demo.launch(server_name="127.0.0.1", server_port=8000, inbrowser=True, share=True)
+demo.launch(server_name="127.0.0.1", server_port=8001, inbrowser=True, share=True)
