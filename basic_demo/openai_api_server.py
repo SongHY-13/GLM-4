@@ -5,6 +5,8 @@ import uvicorn
 import gc
 import json
 import torch
+import random
+import string
 
 from vllm import SamplingParams, AsyncEngineArgs, AsyncLLMEngine
 from fastapi import FastAPI, HTTPException, Response
@@ -16,8 +18,9 @@ from transformers import AutoTokenizer, LogitsProcessor
 from sse_starlette.sse import EventSourceResponse
 
 EventSourceResponse.DEFAULT_PING_INTERVAL = 1000
+import os
 
-MODEL_PATH = 'THUDM/glm-4-9b-chat'
+MODEL_PATH = os.environ.get('MODEL_PATH', 'THUDM/glm-4-9b-chat')
 MAX_MODEL_LENGTH = 8192
 
 
@@ -40,8 +43,13 @@ app.add_middleware(
 )
 
 
+def generate_id(prefix: str, k=29) -> str:
+    suffix = ''.join(random.choices(string.ascii_letters + string.digits, k=k))
+    return f"{prefix}{suffix}"
+
+
 class ModelCard(BaseModel):
-    id: str
+    id: str = ""
     object: str = "model"
     created: int = Field(default_factory=lambda: int(time.time()))
     owned_by: str = "owner"
@@ -56,11 +64,11 @@ class ModelList(BaseModel):
 
 
 class FunctionCall(BaseModel):
-    name: str
-    arguments: str
+    name: Optional[str] = None
+    arguments: Optional[str] = None
 
 
-class FunctionCallResponse(BaseModel):
+class ChoiceDeltaToolCallFunction(BaseModel):
     name: Optional[str] = None
     arguments: Optional[str] = None
 
@@ -72,22 +80,27 @@ class UsageInfo(BaseModel):
 
 
 class ChatCompletionMessageToolCall(BaseModel):
-    id: str
+    index: Optional[int] = 0
+    id: Optional[str] = None
     function: FunctionCall
-    type: Literal["function"]
+    type: Optional[Literal["function"]] = 'function'
 
 
 class ChatMessage(BaseModel):
+    # “function” 字段解释：
+    # 使用较老的OpenAI API版本需要注意在这里添加 function 字段并在 process_messages函数中添加相应角色转换逻辑为 observation
+
     role: Literal["user", "assistant", "system", "tool"]
     content: Optional[str] = None
-    function_call: Optional[FunctionCallResponse] = None
+    function_call: Optional[ChoiceDeltaToolCallFunction] = None
     tool_calls: Optional[List[ChatCompletionMessageToolCall]] = None
 
 
 class DeltaMessage(BaseModel):
     role: Optional[Literal["user", "assistant", "system"]] = None
     content: Optional[str] = None
-    function_call: Optional[FunctionCallResponse] = None
+    function_call: Optional[ChoiceDeltaToolCallFunction] = None
+    tool_calls: Optional[List[ChatCompletionMessageToolCall]] = None
 
 
 class ChatCompletionResponseChoice(BaseModel):
@@ -104,10 +117,11 @@ class ChatCompletionResponseStreamChoice(BaseModel):
 
 class ChatCompletionResponse(BaseModel):
     model: str
-    id: str
+    id: Optional[str] = Field(default_factory=lambda: generate_id('chatcmpl-', 29))
     object: Literal["chat.completion", "chat.completion.chunk"]
     choices: List[Union[ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice]]
     created: Optional[int] = Field(default_factory=lambda: int(time.time()))
+    system_fingerprint: Optional[str] = Field(default_factory=lambda: generate_id('fp_', 9))
     usage: Optional[UsageInfo] = None
 
 
@@ -119,7 +133,7 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
     stream: Optional[bool] = False
     tools: Optional[Union[dict, List[dict]]] = None
-    tool_choice: Optional[Union[str, dict]] = "None"
+    tool_choice: Optional[Union[str, dict]] = None
     repetition_penalty: Optional[float] = 1.1
 
 
@@ -133,46 +147,46 @@ class InvalidScoreLogitsProcessor(LogitsProcessor):
         return scores
 
 
-def process_response(output: str, use_tool: bool = False) -> Union[str, dict]:
+def process_response(output: str, tools: dict | List[dict] = None, use_tool: bool = False) -> Union[str, dict]:
     lines = output.strip().split("\n")
     arguments_json = None
     special_tools = ["cogview", "simple_browser"]
+    tools = {tool['function']['name'] for tool in tools} if tools else {}
 
-    tool_call_pattern = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+    # 这是一个简单的工具比较函数，不能保证拦截所有非工具输出的结果，比如参数未对齐等特殊情况。
+    ##TODO 如果你希望做更多判断，可以在这里进行逻辑完善。
 
-    if len(lines) >= 2 and tool_call_pattern.match(lines[0]):
+    if len(lines) >= 2 and lines[1].startswith("{"):
         function_name = lines[0].strip()
         arguments = "\n".join(lines[1:]).strip()
+        if function_name in tools or function_name in special_tools:
+            try:
+                arguments_json = json.loads(arguments)
+                is_tool_call = True
+            except json.JSONDecodeError:
+                is_tool_call = function_name in special_tools
 
-        try:
-            arguments_json = json.loads(arguments)
-            is_tool_call = True
-        except json.JSONDecodeError:
-            is_tool_call = function_name in special_tools
-
-        if is_tool_call and use_tool:
-            content = {
-                "name": function_name,
-                "arguments": json.dumps(arguments_json if isinstance(arguments_json, dict) else arguments, ensure_ascii=False)
-            }
-            if function_name == "simple_browser":
-                search_pattern = re.compile(r'search\("(.+?)"\s*,\s*recency_days\s*=\s*(\d+)\)')
-                match = search_pattern.match(arguments)
-                if match:
+            if is_tool_call and use_tool:
+                content = {
+                    "name": function_name,
+                    "arguments": json.dumps(arguments_json if isinstance(arguments_json, dict) else arguments,
+                                            ensure_ascii=False)
+                }
+                if function_name == "simple_browser":
+                    search_pattern = re.compile(r'search\("(.+?)"\s*,\s*recency_days\s*=\s*(\d+)\)')
+                    match = search_pattern.match(arguments)
+                    if match:
+                        content["arguments"] = json.dumps({
+                            "query": match.group(1),
+                            "recency_days": int(match.group(2))
+                        }, ensure_ascii=False)
+                elif function_name == "cogview":
                     content["arguments"] = json.dumps({
-                        "query": match.group(1),
-                        "recency_days": int(match.group(2))
+                        "prompt": arguments
                     }, ensure_ascii=False)
-            elif function_name == "cogview":
-                content["arguments"] = json.dumps({
-                    "prompt": arguments
-                }, ensure_ascii=False)
 
-            return content
+                return content
     return output.strip()
-
-
-
 
 
 @torch.inference_mode()
@@ -317,7 +331,6 @@ def process_messages(messages, tools=None, tool_choice="none"):
     return processed_messages
 
 
-
 @app.get("/health")
 async def health() -> Response:
     """Health check."""
@@ -334,7 +347,6 @@ async def list_models():
 async def create_chat_completion(request: ChatCompletionRequest):
     if len(request.messages) < 1 or request.messages[-1].role == "assistant":
         raise HTTPException(status_code=400, detail="Invalid request")
-
 
     gen_params = dict(
         messages=request.messages,
@@ -359,17 +371,16 @@ async def create_chat_completion(request: ChatCompletionRequest):
         function_call = None
         if output and request.tools:
             try:
-                function_call = process_response(output, use_tool=True)
+                function_call = process_response(output, request.tools, use_tool=True)
             except:
                 logger.warning("Failed to parse tool call")
 
         if isinstance(function_call, dict):
-            function_call = FunctionCallResponse(**function_call)
+            function_call = ChoiceDeltaToolCallFunction(**function_call)
             generate = parse_output_text(request.model, output, function_call=function_call)
             return EventSourceResponse(generate, media_type="text/event-stream")
         else:
             return EventSourceResponse(predict_stream_generator, media_type="text/event-stream")
-
     response = ""
     async for response in generate_stream_glm4(gen_params):
         pass
@@ -384,20 +395,19 @@ async def create_chat_completion(request: ChatCompletionRequest):
     tool_calls = None
     if request.tools:
         try:
-            function_call = process_response(response["text"], use_tool=True)
+            function_call = process_response(response["text"], request.tools, use_tool=True)
         except Exception as e:
             logger.warning(f"Failed to parse tool call: {e}")
-
     if isinstance(function_call, dict):
         finish_reason = "tool_calls"
-        function_call_response = FunctionCallResponse(**function_call)
+        function_call_response = ChoiceDeltaToolCallFunction(**function_call)
         function_call_instance = FunctionCall(
             name=function_call_response.name,
             arguments=function_call_response.arguments
         )
         tool_calls = [
             ChatCompletionMessageToolCall(
-                id=f"call_{int(time.time() * 1000)}",
+                id=generate_id('call_', 24),
                 function=function_call_instance,
                 type="function")]
 
@@ -421,7 +431,6 @@ async def create_chat_completion(request: ChatCompletionRequest):
 
     return ChatCompletionResponse(
         model=request.model,
-        id="",
         choices=[choice_data],
         object="chat.completion",
         usage=usage
@@ -432,24 +441,42 @@ async def predict_stream(model_id, gen_params):
     output = ""
     is_function_call = False
     has_send_first_chunk = False
+    created_time = int(time.time())
     function_name = None
+    response_id = generate_id('chatcmpl-', 29)
+    system_fingerprint = generate_id('fp_', 9)
+    tools = {tool['function']['name'] for tool in gen_params['tools']} if gen_params['tools'] else {}
     async for new_response in generate_stream_glm4(gen_params):
         decoded_unicode = new_response["text"]
         delta_text = decoded_unicode[len(output):]
         output = decoded_unicode
         lines = output.strip().split("\n")
 
-        if not is_function_call and len(lines) >= 2 and re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', lines[0]):
-            is_function_call = True
-            function_name = lines[0].strip()
+        # 检查是否为工具
+        # 这是一个简单的工具比较函数，不能保证拦截所有非工具输出的结果，比如参数未对齐等特殊情况。
+        ##TODO 如果你希望做更多处理，可以在这里进行逻辑完善。
 
+        if not is_function_call and len(lines) >= 2:
+            first_line = lines[0].strip()
+            if first_line in tools:
+                is_function_call = True
+                function_name = first_line
+
+        # 工具调用返回
         if is_function_call:
-            for char in delta_text:
-                function_call = {"name": function_name, "arguments": char}
+            if not has_send_first_chunk:
+                function_call = {"name": function_name, "arguments": ""}
+                tool_call = ChatCompletionMessageToolCall(
+                    index=0,
+                    id=generate_id('call_', 24),
+                    function=FunctionCall(**function_call),
+                    type="function"
+                )
                 message = DeltaMessage(
                     content=None,
                     role="assistant",
-                    function_call=function_call
+                    function_call=None,
+                    tool_calls=[tool_call]
                 )
                 choice_data = ChatCompletionResponseStreamChoice(
                     index=0,
@@ -458,39 +485,54 @@ async def predict_stream(model_id, gen_params):
                 )
                 chunk = ChatCompletionResponse(
                     model=model_id,
-                    id="",
+                    id=response_id,
                     choices=[choice_data],
-                    created=int(time.time()),
+                    created=created_time,
+                    system_fingerprint=system_fingerprint,
                     object="chat.completion.chunk"
                 )
+                yield ""
                 yield chunk.model_dump_json(exclude_unset=True)
-        else:
-            if len(output) > 7:
-                finish_reason = new_response.get("finish_reason", None)
-                if not has_send_first_chunk:
-                    message = DeltaMessage(
-                        content="",
-                        role="assistant",
-                        function_call=None,
-                    )
-                    choice_data = ChatCompletionResponseStreamChoice(
-                        index=0,
-                        delta=message,
-                        finish_reason=finish_reason
-                    )
-                    chunk = ChatCompletionResponse(
-                        model=model_id,
-                        id="",
-                        choices=[choice_data],
-                        created=int(time.time()),
-                        object="chat.completion.chunk"
-                    )
-                    yield chunk.model_dump_json(exclude_unset=True)
-
-                send_msg = delta_text if has_send_first_chunk else output
                 has_send_first_chunk = True
+
+            function_call = {"name": None, "arguments": delta_text}
+            tool_call = ChatCompletionMessageToolCall(
+                index=0,
+                id=None,
+                function=FunctionCall(**function_call),
+                type="function"
+            )
+            message = DeltaMessage(
+                content=None,
+                role=None,
+                function_call=None,
+                tool_calls=[tool_call]
+            )
+            choice_data = ChatCompletionResponseStreamChoice(
+                index=0,
+                delta=message,
+                finish_reason=None
+            )
+            chunk = ChatCompletionResponse(
+                model=model_id,
+                id=response_id,
+                choices=[choice_data],
+                created=created_time,
+                system_fingerprint=system_fingerprint,
+                object="chat.completion.chunk"
+            )
+            yield chunk.model_dump_json(exclude_unset=True)
+
+        # 用户请求了 Function Call 但是框架还没确定是否为Function Call
+        elif (gen_params["tools"] and gen_params["tool_choice"] != "none") or is_function_call:
+            continue
+
+        # 常规返回
+        else:
+            finish_reason = new_response.get("finish_reason", None)
+            if not has_send_first_chunk:
                 message = DeltaMessage(
-                    content=send_msg,
+                    content="",
                     role="assistant",
                     function_call=None,
                 )
@@ -501,20 +543,59 @@ async def predict_stream(model_id, gen_params):
                 )
                 chunk = ChatCompletionResponse(
                     model=model_id,
-                    id="",
+                    id=response_id,
                     choices=[choice_data],
-                    created=int(time.time()),
+                    created=created_time,
+                    system_fingerprint=system_fingerprint,
                     object="chat.completion.chunk"
                 )
                 yield chunk.model_dump_json(exclude_unset=True)
+                has_send_first_chunk = True
 
+            message = DeltaMessage(
+                content=delta_text,
+                role="assistant",
+                function_call=None,
+            )
+            choice_data = ChatCompletionResponseStreamChoice(
+                index=0,
+                delta=message,
+                finish_reason=finish_reason
+            )
+            chunk = ChatCompletionResponse(
+                model=model_id,
+                id=response_id,
+                choices=[choice_data],
+                created=created_time,
+                system_fingerprint=system_fingerprint,
+                object="chat.completion.chunk"
+            )
+            yield chunk.model_dump_json(exclude_unset=True)
+
+    # 工具调用需要额外返回一个字段以对齐 OpenAI 接口
     if is_function_call:
-        yield json.dumps({"text": output})
-    else:
-        yield '[DONE]'
+        yield ChatCompletionResponse(
+            model=model_id,
+            id=response_id,
+            system_fingerprint=system_fingerprint,
+            choices=[
+                ChatCompletionResponseStreamChoice(
+                    index=0,
+                    delta=DeltaMessage(
+                        content=None,
+                        role=None,
+                        function_call=None,
+                    ),
+                    finish_reason="tool_calls"
+                )],
+            created=created_time,
+            object="chat.completion.chunk",
+            usage=None
+        ).model_dump_json(exclude_unset=True)
+    yield '[DONE]'
 
 
-async def parse_output_text(model_id: str, value: str, function_call: FunctionCallResponse = None):
+async def parse_output_text(model_id: str, value: str, function_call: ChoiceDeltaToolCallFunction = None):
     delta = DeltaMessage(role="assistant", content=value)
     if function_call is not None:
         delta.function_call = function_call
@@ -524,15 +605,21 @@ async def parse_output_text(model_id: str, value: str, function_call: FunctionCa
         delta=delta,
         finish_reason=None
     )
-    chunk = ChatCompletionResponse(model=model_id, id="", choices=[choice_data], object="chat.completion.chunk")
+    chunk = ChatCompletionResponse(
+        model=model_id,
+        choices=[choice_data],
+        object="chat.completion.chunk"
+    )
     yield "{}".format(chunk.model_dump_json(exclude_unset=True))
     yield '[DONE]'
+
 
 if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
     engine_args = AsyncEngineArgs(
         model=MODEL_PATH,
         tokenizer=MODEL_PATH,
+        # 如果你有多张显卡，可以在这里设置成你的显卡数量
         tensor_parallel_size=1,
         dtype="bfloat16",
         trust_remote_code=True,

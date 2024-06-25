@@ -33,7 +33,7 @@ VLM_MODEL_PATH = os.environ.get("VLM_MODEL_PATH", "/home/data/GLM-4/modelTemp/gl
 
 # os.environ['USE_VLLM'] = '1' #设置环境变量以使用VLLM
 USE_VLLM = os.environ.get("USE_VLLM", "0") == "1"
-
+USE_API = os.environ.get("USE_API", "0") == "1"
 
 class Mode(str, Enum):
     ALL_TOOLS = "🛠️ All Tools"
@@ -105,6 +105,7 @@ def build_client(mode: Mode) -> Client:
         case Mode.ALL_TOOLS:
             st.session_state.top_k = 10
             typ = ClientType.VLLM if USE_VLLM else ClientType.HF
+            typ = ClientType.API if USE_API else typ
             return get_client(CHAT_MODEL_PATH, typ)
         case Mode.LONG_CTX:
             st.session_state.top_k = 10
